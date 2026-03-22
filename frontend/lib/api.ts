@@ -27,22 +27,22 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export async function fetchOpenTrades(): Promise<Trade[]> {
-  return apiRequest<Trade[]>("/api/trades/open");
+  return apiRequest<Trade[]>("/trades/open");
 }
 
 export async function fetchTrades(status: "all" | "open" | "closed" = "all"): Promise<Trade[]> {
-  return apiRequest<Trade[]>(`/api/trades?status=${status}`);
+  return apiRequest<Trade[]>(`/trades?status=${status}`);
 }
 
 export async function createTrade(payload: TradeCreatePayload): Promise<Trade> {
-  return apiRequest<Trade>("/api/trades", {
+  return apiRequest<Trade>("/trades", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
 export async function syncMarketData(): Promise<SyncSummary> {
-  return apiRequest<SyncSummary>("/api/trades/sync-market-data", {
+  return apiRequest<SyncSummary>("/trades/sync-market-data", {
     method: "POST",
   });
 }
@@ -51,7 +51,7 @@ export async function updateManualExtremes(
   tradeId: number,
   payload: ManualExtremesPayload,
 ): Promise<Trade> {
-  return apiRequest<Trade>(`/api/trades/${tradeId}/manual-extremes`, {
+  return apiRequest<Trade>(`/trades/${tradeId}/manual-extremes`, {
     method: "PATCH",
     body: JSON.stringify(payload),
   });
