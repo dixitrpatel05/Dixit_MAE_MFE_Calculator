@@ -4,7 +4,7 @@
   publish = ".next"
 
 [functions]
-  directory = "frontend/netlify/functions"
+  directory = "netlify/functions"
 
 [[redirects]]
   from = "/api/*"
