@@ -1,10 +1,10 @@
 [build]
-  base = "frontend"
-  command = "npm run build"
-  publish = ".next"
+  command = "cd frontend && npm run build"
+  publish = "frontend/.next"
 
 [functions]
-  directory = "netlify/functions"
+  directory = "frontend/netlify/functions"
+  included_files = ["backend/**"]
 
 [[redirects]]
   from = "/api/*"
