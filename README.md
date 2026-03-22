@@ -116,17 +116,12 @@ curl http://127.0.0.1:8000/health
 - SQLite uses a persistent Render Disk mounted at `/var/data`.
 - Production DB URL in `render.yaml`: `sqlite:////var/data/trades.db`
 
-## Netlify Deployment (Frontend on Netlify + Backend on Render)
+## Netlify Deployment (Frontend + API on Netlify)
 
-This repo includes root Netlify configuration in `netlify.toml` and a Node Netlify Function at `frontend/netlify/functions/api.js`.
-
-The Netlify function acts as a same-origin proxy:
-- Browser calls `/api/...` on Netlify
-- Netlify function forwards to your backend origin (Render)
+This repo now runs frontend and API together on Netlify using Next.js route handlers under `frontend/app/api/**`.
 
 ### Important Production Requirement
-Host backend separately (Render is already configured via `render.yaml`).
-Do **not** run Python backend inside Netlify Functions for this setup.
+Use Neon Postgres through Netlify environment variables.
 
 ### Netlify Setup Steps
 1. In Netlify, create a new site from this repository.
@@ -136,7 +131,7 @@ Do **not** run Python backend inside Netlify Functions for this setup.
 	- Publish directory: `.next`
 3. Add environment variables in Netlify Site Settings:
 	- `NEXT_PUBLIC_API_BASE_URL=/api`
-	- `BACKEND_API_ORIGIN=https://<your-render-backend-domain>`
+	- `NETLIFY_DATABASE_URL=<neon-connection-string>` (or `DATABASE_URL`)
 4. Deploy the site.
 
 Netlify UI overrides can break path resolution. Keep these settings empty in UI unless needed:
@@ -149,8 +144,7 @@ Use values from `netlify.toml` as the source of truth.
 
 ### API Routing on Netlify
 - Frontend calls `/api/...` (same-origin).
-- Root `netlify.toml` rewrites `/api/*` to Netlify Function `api`.
-- Function proxies requests to `${BACKEND_API_ORIGIN}/api/...`.
+- Next.js API routes (`frontend/app/api/**`) are deployed by Netlify's Next runtime.
 
 ### Local Development (unchanged)
 - Backend local run still uses `uvicorn` from `backend/`.
