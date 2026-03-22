@@ -116,6 +116,37 @@ curl http://127.0.0.1:8000/health
 - SQLite uses a persistent Render Disk mounted at `/var/data`.
 - Production DB URL in `render.yaml`: `sqlite:////var/data/trades.db`
 
+## Netlify Deployment (Frontend + Backend on Netlify)
+
+This repo now includes Netlify configuration in `frontend/netlify.toml` and a Python serverless function at `frontend/netlify/functions/api.py`.
+
+### Important Production Requirement
+Use a managed Postgres database URL in production (`DATABASE_URL`).
+Do **not** use local SQLite on Netlify because serverless file storage is ephemeral.
+
+### Netlify Setup Steps
+1. In Netlify, create a new site from this repository.
+2. Configure build settings:
+	- Base directory: `frontend`
+	- Build command: `npm run build`
+	- Publish directory: `.next`
+3. Add environment variables in Netlify Site Settings:
+	- `NEXT_PUBLIC_API_BASE_URL=/api`
+	- `DATABASE_URL=<your-managed-postgres-connection-string>`
+	- `API_CORS_ORIGINS=https://<your-netlify-site>.netlify.app`
+	- `APP_ENV=production`
+	- `APP_DEBUG=false`
+4. Deploy the site.
+
+### API Routing on Netlify
+- Frontend calls `/api/...` (same-origin).
+- `frontend/netlify.toml` rewrites `/api/*` to Netlify Function `api`.
+- Function bootstraps existing FastAPI app through Mangum.
+
+### Local Development (unchanged)
+- Backend local run still uses `uvicorn` from `backend/`.
+- Frontend local run still works with `.env.local` pointing to local backend.
+
 ## Environment Variables
 `backend/app/core/config.py` supports:
 - `APP_NAME`
