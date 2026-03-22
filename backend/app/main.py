@@ -38,4 +38,9 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/health")
+def api_health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 app.include_router(trades_router)
