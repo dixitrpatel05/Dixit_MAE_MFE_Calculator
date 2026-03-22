@@ -16,7 +16,7 @@ os.environ.setdefault("APP_DEBUG", "false")
 from app.main import app  # noqa: E402
 
 
-asgi_handler = Mangum(app, lifespan="off")
+asgi_handler = Mangum(app, lifespan="off", api_gateway_base_path="/.netlify/functions")
 
 
 def handler(event, context):
