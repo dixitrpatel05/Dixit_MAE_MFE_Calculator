@@ -49,6 +49,15 @@ function normalizeSymbol(value: string): string {
   return `${cleaned}.NS`;
 }
 
+function isValidQuotePayload(value: unknown): value is {
+  symbol?: string | null;
+  shortName?: string | null;
+  longName?: string | null;
+  regularMarketPrice?: number | null;
+} {
+  return typeof value === "object" && value !== null;
+}
+
 async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
   const cleaned = rawSymbol.trim().toUpperCase();
   if (!cleaned) {
@@ -65,9 +74,8 @@ async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
 
   for (const candidate of candidates) {
     try {
-      const quote = (await yahooFinance.quote(candidate)) as { regularMarketPrice?: number | null };
-      const marketPrice = quote.regularMarketPrice;
-      if (Number.isFinite(marketPrice)) {
+      const quote: unknown = await yahooFinance.quote(candidate);
+      if (isValidQuotePayload(quote) && (quote.symbol || quote.shortName || quote.longName)) {
         return candidate;
       }
     } catch {
@@ -87,8 +95,8 @@ async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
 
     for (const candidate of quoteCandidates) {
       try {
-        const quote = (await yahooFinance.quote(candidate)) as { regularMarketPrice?: number | null };
-        if (Number.isFinite(quote.regularMarketPrice)) {
+        const quote: unknown = await yahooFinance.quote(candidate);
+        if (isValidQuotePayload(quote) && (quote.symbol || quote.shortName || quote.longName)) {
           return candidate.toUpperCase();
         }
       } catch {
@@ -341,16 +349,22 @@ export async function createTrade(payload: TradeCreatePayload): Promise<Trade> {
 export async function updateTrade(tradeId: number, payload: TradeUpdatePayload): Promise<Trade> {
   await ensureSchema();
 
-  const existing = (await sql`SELECT id, status FROM trades WHERE id = ${tradeId}`) as unknown as Array<{
+  const existing = (await sql`SELECT id, status, symbol FROM trades WHERE id = ${tradeId}`) as unknown as Array<{
     id: number;
     status: "Open" | "Closed";
+    symbol: string;
   }>;
 
   if (!existing.length) {
     throw new ApiError(404, "Trade not found.");
   }
 
-  const symbol = await resolveYahooSymbol(normalizeSymbol(payload.symbol));
+  const requestedSymbol = normalizeSymbol(payload.symbol);
+  const existingSymbol = existing[0].symbol.toUpperCase();
+  const symbol =
+    requestedSymbol.toUpperCase() === existingSymbol
+      ? existing[0].symbol
+      : await resolveYahooSymbol(requestedSymbol);
   const entryDateTime = toDate(payload.entry_date_time, "entry_date_time");
 
   if (!(payload.entry_price > 0) || !(payload.stop_loss > 0) || !(payload.quantity > 0)) {
@@ -527,8 +541,8 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
         }
 
         try {
-          const quote = (await yahooFinance.quote(trade.symbol)) as { regularMarketPrice?: number | null };
-          const last = quote.regularMarketPrice;
+          const quote: unknown = await yahooFinance.quote(trade.symbol);
+          const last = isValidQuotePayload(quote) ? quote.regularMarketPrice : null;
           if (Number.isFinite(last)) {
             await sql`
               INSERT INTO trade_metrics (
@@ -626,4 +640,15 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
     skipped_trades: skippedTrades,
     results,
   };
+}
+
+export async function deleteTrade(tradeId: number): Promise<void> {
+  await ensureSchema();
+
+  const existing = (await sql`SELECT id FROM trades WHERE id = ${tradeId}`) as unknown as Array<{ id: number }>;
+  if (!existing.length) {
+    throw new ApiError(404, "Trade not found.");
+  }
+
+  await sql`DELETE FROM trades WHERE id = ${tradeId}`;
 }

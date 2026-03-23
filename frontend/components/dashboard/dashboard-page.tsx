@@ -1,9 +1,9 @@
 "use client";
 
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { ArrowUpDown, Pencil, RefreshCw, SquarePen, X } from "lucide-react";
+import { ArrowUpDown, Pencil, RefreshCw, SquarePen, Trash2, X } from "lucide-react";
 
-import { createTrade, fetchTrades, syncMarketData, updateManualExtremes, updateTrade } from "@/lib/api";
+import { createTrade, deleteTrade, fetchTrades, syncMarketData, updateManualExtremes, updateTrade } from "@/lib/api";
 import type {
   ManualExtremesPayload,
   Trade,
@@ -102,6 +102,7 @@ export function DashboardPage() {
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [syncDetails, setSyncDetails] = useState<Array<{ symbol: string; status: "synced" | "skipped"; reason: string }>>([]);
   const [allTrades, setAllTrades] = useState<Trade[]>([]);
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
   const [editingTrade, setEditingTrade] = useState<Trade | null>(null);
@@ -249,6 +250,7 @@ export function DashboardPage() {
     setSuccessMessage(null);
     try {
       const summary = await syncMarketData();
+      setSyncDetails(summary.results.map((item) => ({ symbol: item.symbol, status: item.status, reason: item.reason })));
       await loadTrades();
       const problemRows = summary.results.filter((item) => item.status === "skipped").slice(0, 2);
       const problemHint = problemRows.length
@@ -261,6 +263,24 @@ export function DashboardPage() {
       setErrorMessage(error instanceof Error ? error.message : "Market sync failed.");
     } finally {
       setIsSyncing(false);
+    }
+  }
+
+  async function handleDeleteTrade(trade: Trade): Promise<void> {
+    const confirmed = window.confirm(`Delete trade ${trade.symbol}? This cannot be undone.`);
+    if (!confirmed) {
+      return;
+    }
+
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    try {
+      await deleteTrade(trade.id);
+      await loadTrades();
+      setSuccessMessage(`Trade ${trade.symbol} deleted.`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to delete trade.");
     }
   }
 
@@ -471,6 +491,25 @@ export function DashboardPage() {
           </section>
         )}
 
+        {syncDetails.length > 0 && (
+          <section className="rounded-lg border bg-card p-4">
+            <h3 className="mb-2 text-sm font-medium">Latest Sync Details</h3>
+            <div className="space-y-1 text-xs text-muted-foreground">
+              {syncDetails.slice(0, 8).map((item, index) => (
+                <div key={`${item.symbol}-${index}`}>
+                  <span className="font-medium text-foreground">{item.symbol}</span>
+                  {" · "}
+                  <span className={item.status === "synced" ? "text-foreground" : "text-foreground"}>
+                    {item.status.toUpperCase()}
+                  </span>
+                  {" · "}
+                  {item.reason}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="grid gap-6 lg:grid-cols-3">
           <Card className="border-border/80 bg-card/80 backdrop-blur-sm">
             <CardHeader>
@@ -587,6 +626,14 @@ export function DashboardPage() {
                             <Button variant="outline" className="h-8 px-3" onClick={() => openManualModal(trade)}>
                               <Pencil className="mr-1 h-3.5 w-3.5" />
                               Manual
+                            </Button>
+                            <Button
+                              variant="outline"
+                              className="h-8 px-3"
+                              onClick={() => void handleDeleteTrade(trade)}
+                            >
+                              <Trash2 className="mr-1 h-3.5 w-3.5" />
+                              Delete
                             </Button>
                           </div>
                         </TableCell>

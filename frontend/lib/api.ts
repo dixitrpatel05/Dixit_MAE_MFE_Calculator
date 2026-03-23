@@ -54,6 +54,12 @@ export async function updateTrade(tradeId: number, payload: TradeUpdatePayload):
   });
 }
 
+export async function deleteTrade(tradeId: number): Promise<void> {
+  await apiRequest<{ status: string }>(`/trades/${tradeId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function syncMarketData(): Promise<SyncSummary> {
   return apiRequest<SyncSummary>("/trades/sync-market-data", {
     method: "POST",
