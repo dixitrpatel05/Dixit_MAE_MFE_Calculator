@@ -43,16 +43,36 @@ function normalizeSymbol(value: string): string {
   const cleaned = value
     .trim()
     .toUpperCase()
-    .replace(/^NSE:/, "")
-    .replace(/^BSE:/, "")
     .replace(/\s+/g, "");
   if (!cleaned) {
     throw new ApiError(400, "symbol is required.");
   }
-  if (cleaned.endsWith(".NS") || cleaned.endsWith(".BO")) {
-    return cleaned;
-  }
-  return `${cleaned}.NS`;
+  return cleaned;
+}
+
+function extractBaseSymbol(symbol: string): string {
+  return symbol
+    .replace(/^NSE:/, "")
+    .replace(/^BSE:/, "")
+    .replace(/\.NS$/, "")
+    .replace(/\.BO$/, "");
+}
+
+function buildFinnhubCandidates(symbol: string): string[] {
+  const base = extractBaseSymbol(symbol);
+
+  const candidates = Array.from(
+    new Set([
+      symbol,
+      `NSE:${base}`,
+      `BSE:${base}`,
+      `${base}.NS`,
+      `${base}.BO`,
+      base,
+    ]),
+  );
+
+  return candidates.filter((value) => /^[A-Z0-9:.\-]{1,30}$/.test(value));
 }
 
 function isTransientFinnhubError(error: unknown): boolean {
@@ -102,14 +122,22 @@ async function fetchFromFinnhub(endpoint: string, params: Record<string, string>
 }
 
 async function getFinnhubQuote(symbol: string): Promise<{
-  symbol?: string;
-  description?: string;
   c?: number;
+  h?: number;
+  l?: number;
+  o?: number;
+  pc?: number;
 } | null> {
   try {
     const data = await fetchFromFinnhub("/quote", { symbol });
     if (typeof data === "object" && data !== null && "c" in data) {
-      return data as { symbol?: string; description?: string; c?: number };
+      return data as {
+        c?: number;
+        h?: number;
+        l?: number;
+        o?: number;
+        pc?: number;
+      };
     }
     return null;
   } catch (error) {
@@ -118,6 +146,24 @@ async function getFinnhubQuote(symbol: string): Promise<{
     }
     throw error;
   }
+}
+
+function isValidFinnhubQuote(
+  quote: {
+    c?: number;
+    h?: number;
+    l?: number;
+    o?: number;
+    pc?: number;
+  } | null,
+): boolean {
+  if (!quote) {
+    return false;
+  }
+
+  return [quote.c, quote.h, quote.l, quote.o, quote.pc].some(
+    (value) => typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
 }
 
 async function getFinnhubSymbolLookup(query: string): Promise<Array<{
@@ -166,73 +212,73 @@ async function getFinnhubCandles(symbol: string, from: number, to: number): Prom
 }
 
 async function resolveFinnhubSymbol(rawSymbol: string): Promise<string> {
-  const cleaned = rawSymbol.trim().toUpperCase();
+  const cleaned = normalizeSymbol(rawSymbol);
   if (!cleaned) {
     throw new ApiError(400, "symbol is required.");
   }
 
-  if (!/^[A-Z0-9.\-]{1,20}$/.test(cleaned)) {
+  if (!/^[A-Z0-9:.\-]{1,30}$/.test(cleaned)) {
     throw new ApiError(400, `Invalid symbol format '${cleaned}'.`);
   }
 
-  // Try direct candidates first (NSE/BSE suffixes)
-  const candidates = Array.from(
-    new Set([
-      cleaned,
-      cleaned.endsWith(".NS") || cleaned.endsWith(".BO") ? cleaned : `${cleaned}.NS`,
-      cleaned.endsWith(".NS") || cleaned.endsWith(".BO") ? cleaned : `${cleaned}.BO`,
-    ]),
-  );
+  const candidates = buildFinnhubCandidates(cleaned);
 
   for (const candidate of candidates) {
     try {
       const quote = await getFinnhubQuote(candidate);
-      if (quote && quote.symbol) {
+      if (isValidFinnhubQuote(quote)) {
         return candidate;
       }
     } catch {
-      // Try next candidate
+      // Try next candidate.
     }
   }
 
-  // Fallback: Try symbol lookup via Finnhub search
-  try {
-    const results = await getFinnhubSymbolLookup(cleaned);
-    for (const result of results) {
-      if (!result.symbol) continue;
+  const searchQuery = extractBaseSymbol(cleaned);
 
-      const symbol = result.symbol.toUpperCase();
-      // Prefer NSE/BSE symbols for Indian stocks
-      if (symbol.endsWith(".NS") || symbol.endsWith(".BO")) {
+  try {
+    const results = await getFinnhubSymbolLookup(searchQuery);
+    const resolvedCandidates = Array.from(
+      new Set(
+        results
+          .map((item) => item.symbol?.toUpperCase().trim())
+          .filter((value): value is string => Boolean(value && /^[A-Z0-9:.\-]{1,30}$/.test(value))),
+      ),
+    ).sort((first, second) => {
+      const score = (value: string): number => {
+        if (value.startsWith("NSE:")) return 3;
+        if (value.startsWith("BSE:")) return 2;
+        if (value.endsWith(".NS") || value.endsWith(".BO")) return 1;
+        return 0;
+      };
+      return score(second) - score(first);
+    });
+
+    for (const candidate of resolvedCandidates) {
+      const candidateForms = buildFinnhubCandidates(candidate);
+      for (const form of candidateForms) {
         try {
-          const quote = await getFinnhubQuote(symbol);
-          if (quote && quote.symbol) {
-            return symbol;
+          const quote = await getFinnhubQuote(form);
+          if (isValidFinnhubQuote(quote)) {
+            return form;
           }
         } catch {
-          // Continue searching
+          // Continue searching.
         }
       }
     }
 
-    // If no NSE/BSE found, try the first result
-    for (const result of results) {
-      if (result.symbol) {
-        try {
-          const quote = await getFinnhubQuote(result.symbol);
-          if (quote && quote.symbol) {
-            return result.symbol.toUpperCase();
-          }
-        } catch {
-          // Continue searching
-        }
-      }
+    if (resolvedCandidates.length > 0) {
+      return resolvedCandidates[0];
     }
   } catch {
-    // Search failed, fall through to error
+    // Fall through to clear validation error below.
   }
 
-  throw new ApiError(400, `Symbol '${cleaned}' not found on Finnhub.`);
+  throw new ApiError(
+    400,
+    `Symbol '${cleaned}' not found on Finnhub. Try NSE:SYMBOL or BSE:SYMBOL format.`,
+  );
 }
 
 function normalizeNotes(value: string | null | undefined): string | null {
