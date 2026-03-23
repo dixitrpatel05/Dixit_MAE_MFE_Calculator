@@ -1,4 +1,10 @@
-import type { ManualExtremesPayload, SyncSummary, Trade, TradeCreatePayload } from "@/lib/types";
+import type {
+  ManualExtremesPayload,
+  SyncSummary,
+  Trade,
+  TradeCreatePayload,
+  TradeUpdatePayload,
+} from "@/lib/types";
 
 const API_BASE_URL = "/api";
 
@@ -37,6 +43,13 @@ export async function fetchTrades(status: "all" | "open" | "closed" = "all"): Pr
 export async function createTrade(payload: TradeCreatePayload): Promise<Trade> {
   return apiRequest<Trade>("/trades", {
     method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateTrade(tradeId: number, payload: TradeUpdatePayload): Promise<Trade> {
+  return apiRequest<Trade>(`/trades/${tradeId}`, {
+    method: "PATCH",
     body: JSON.stringify(payload),
   });
 }

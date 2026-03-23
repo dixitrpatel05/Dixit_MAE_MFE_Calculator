@@ -1,6 +1,12 @@
 import yahooFinance from "yahoo-finance2";
 
-import type { ManualExtremesPayload, SyncSummary, Trade, TradeCreatePayload } from "@/lib/types";
+import type {
+  ManualExtremesPayload,
+  SyncSummary,
+  Trade,
+  TradeCreatePayload,
+  TradeUpdatePayload,
+} from "@/lib/types";
 import { ensureSchema, sql } from "@/lib/server/db";
 
 type TradeRow = {
@@ -41,6 +47,59 @@ function normalizeSymbol(value: string): string {
     return cleaned;
   }
   return `${cleaned}.NS`;
+}
+
+async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
+  const cleaned = rawSymbol.trim().toUpperCase();
+  if (!cleaned) {
+    throw new ApiError(400, "symbol is required.");
+  }
+
+  const candidates = Array.from(
+    new Set([
+      cleaned,
+      cleaned.endsWith(".NS") || cleaned.endsWith(".BO") ? cleaned : `${cleaned}.NS`,
+      cleaned.endsWith(".NS") || cleaned.endsWith(".BO") ? cleaned : `${cleaned}.BO`,
+    ]),
+  );
+
+  for (const candidate of candidates) {
+    try {
+      const quote = (await yahooFinance.quote(candidate)) as { regularMarketPrice?: number | null };
+      const marketPrice = quote.regularMarketPrice;
+      if (Number.isFinite(marketPrice)) {
+        return candidate;
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  try {
+    const search = (await yahooFinance.search(cleaned, {
+      quotesCount: 8,
+      newsCount: 0,
+    })) as { quotes?: Array<{ symbol?: string | null }> };
+    const quoteCandidates = (search.quotes ?? [])
+      .map((item) => item.symbol)
+      .filter((symbol): symbol is string => typeof symbol === "string" && symbol.length > 0)
+      .filter((symbol) => !symbol.includes("="));
+
+    for (const candidate of quoteCandidates) {
+      try {
+        const quote = (await yahooFinance.quote(candidate)) as { regularMarketPrice?: number | null };
+        if (Number.isFinite(quote.regularMarketPrice)) {
+          return candidate.toUpperCase();
+        }
+      } catch {
+        // Keep checking.
+      }
+    }
+  } catch {
+    // Ignore search failure and throw clear error below.
+  }
+
+  throw new ApiError(400, `No such symbol found on Yahoo Finance for '${cleaned}'.`);
 }
 
 function normalizeNotes(value: string | null | undefined): string | null {
@@ -192,7 +251,7 @@ export async function listTrades(status: "all" | "open" | "closed"): Promise<Tra
 export async function createTrade(payload: TradeCreatePayload): Promise<Trade> {
   await ensureSchema();
 
-  const symbol = normalizeSymbol(payload.symbol);
+  const symbol = await resolveYahooSymbol(normalizeSymbol(payload.symbol));
   const entryDateTime = toDate(payload.entry_date_time, "entry_date_time");
 
   if (!(payload.entry_price > 0) || !(payload.stop_loss > 0) || !(payload.quantity > 0)) {
@@ -262,6 +321,60 @@ export async function createTrade(payload: TradeCreatePayload): Promise<Trade> {
       ${normalizeNotes(payload.manual_notes)},
       ${hasManual ? new Date().toISOString() : null}
     )
+  `;
+
+  const rows = (await sql`
+    SELECT
+      t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
+      t.status, t.exit_date_time, t.exit_price,
+      m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
+      m.manual_highest_price_reached, m.manual_lowest_price_reached,
+      m.manual_notes, m.manual_updated_at, m.last_synced_at
+    FROM trades t
+    LEFT JOIN trade_metrics m ON m.trade_id = t.id
+    WHERE t.id = ${tradeId}
+  `) as unknown as TradeRow[];
+
+  return toTradeResponse(rows[0]);
+}
+
+export async function updateTrade(tradeId: number, payload: TradeUpdatePayload): Promise<Trade> {
+  await ensureSchema();
+
+  const existing = (await sql`SELECT id, status FROM trades WHERE id = ${tradeId}`) as unknown as Array<{
+    id: number;
+    status: "Open" | "Closed";
+  }>;
+
+  if (!existing.length) {
+    throw new ApiError(404, "Trade not found.");
+  }
+
+  const symbol = await resolveYahooSymbol(normalizeSymbol(payload.symbol));
+  const entryDateTime = toDate(payload.entry_date_time, "entry_date_time");
+
+  if (!(payload.entry_price > 0) || !(payload.stop_loss > 0) || !(payload.quantity > 0)) {
+    throw new ApiError(400, "entry_price, stop_loss and quantity must be greater than 0.");
+  }
+
+  if (payload.side === "Long" && payload.stop_loss >= payload.entry_price) {
+    throw new ApiError(400, "For Long trades, stop_loss must be less than entry_price.");
+  }
+
+  if (payload.side === "Short" && payload.stop_loss <= payload.entry_price) {
+    throw new ApiError(400, "For Short trades, stop_loss must be greater than entry_price.");
+  }
+
+  await sql`
+    UPDATE trades
+    SET
+      symbol = ${symbol},
+      side = ${payload.side},
+      entry_date_time = ${entryDateTime.toISOString()},
+      entry_price = ${payload.entry_price},
+      stop_loss = ${payload.stop_loss},
+      quantity = ${payload.quantity}
+    WHERE id = ${tradeId}
   `;
 
   const rows = (await sql`
@@ -371,13 +484,22 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
   const maxLookbackStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   let syncedTrades = 0;
   let skippedTrades = 0;
+  const results: SyncSummary["results"] = [];
 
   for (const trade of openTrades) {
     const start = trade.last_synced_at ? new Date(trade.last_synced_at) : new Date(trade.entry_date_time);
     const startTime = start > maxLookbackStart ? start : maxLookbackStart;
+    const tradeAgeMs = now.getTime() - new Date(trade.entry_date_time).getTime();
+    const isBeyondIntradayWindow = tradeAgeMs > 7 * 24 * 60 * 60 * 1000;
 
     if (startTime >= now) {
       skippedTrades += 1;
+      results.push({
+        trade_id: trade.id,
+        symbol: trade.symbol,
+        status: "skipped",
+        reason: "Already synced recently.",
+      });
       continue;
     }
 
@@ -393,6 +515,52 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
       const lows = quotes.map((quote) => quote.low).filter((value): value is number => Number.isFinite(value));
 
       if (!highs.length || !lows.length) {
+        if (isBeyondIntradayWindow) {
+          skippedTrades += 1;
+          results.push({
+            trade_id: trade.id,
+            symbol: trade.symbol,
+            status: "skipped",
+            reason: "No 5m Yahoo data beyond 7 days. Add manual MAE/MFE values.",
+          });
+          continue;
+        }
+
+        try {
+          const quote = (await yahooFinance.quote(trade.symbol)) as { regularMarketPrice?: number | null };
+          const last = quote.regularMarketPrice;
+          if (Number.isFinite(last)) {
+            await sql`
+              INSERT INTO trade_metrics (
+                trade_id,
+                absolute_highest_price_reached,
+                absolute_lowest_price_reached,
+                last_synced_at
+              ) VALUES (
+                ${trade.id},
+                ${last},
+                ${last},
+                ${now.toISOString()}
+              )
+              ON CONFLICT (trade_id)
+              DO UPDATE SET
+                absolute_highest_price_reached = GREATEST(COALESCE(trade_metrics.absolute_highest_price_reached, ${last}), ${last}),
+                absolute_lowest_price_reached = LEAST(COALESCE(trade_metrics.absolute_lowest_price_reached, ${last}), ${last}),
+                last_synced_at = EXCLUDED.last_synced_at
+            `;
+            syncedTrades += 1;
+            results.push({
+              trade_id: trade.id,
+              symbol: trade.symbol,
+              status: "synced",
+              reason: "Fallback synced using latest market price.",
+            });
+            continue;
+          }
+        } catch {
+          // Fall through to skipped below.
+        }
+
         await sql`
           INSERT INTO trade_metrics (trade_id, last_synced_at)
           VALUES (${trade.id}, ${now.toISOString()})
@@ -400,6 +568,12 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
           DO UPDATE SET last_synced_at = EXCLUDED.last_synced_at
         `;
         skippedTrades += 1;
+        results.push({
+          trade_id: trade.id,
+          symbol: trade.symbol,
+          status: "skipped",
+          reason: "No market data returned for this symbol/time range.",
+        });
         continue;
       }
 
@@ -428,8 +602,21 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
       `;
 
       syncedTrades += 1;
-    } catch {
+      results.push({
+        trade_id: trade.id,
+        symbol: trade.symbol,
+        status: "synced",
+        reason: "Synced from Yahoo 5m candles.",
+      });
+    } catch (error) {
       skippedTrades += 1;
+      const reason = error instanceof Error ? error.message : "Unknown sync error.";
+      results.push({
+        trade_id: trade.id,
+        symbol: trade.symbol,
+        status: "skipped",
+        reason: `Sync failed: ${reason}`,
+      });
     }
   }
 
@@ -437,5 +624,6 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
     total_open_trades: openTrades.length,
     synced_trades: syncedTrades,
     skipped_trades: skippedTrades,
+    results,
   };
 }

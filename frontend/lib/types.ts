@@ -51,6 +51,15 @@ export type TradeCreatePayload = {
   manual_notes?: string;
 };
 
+export type TradeUpdatePayload = {
+  symbol: string;
+  side: TradeSide;
+  entry_date_time: string;
+  entry_price: number;
+  stop_loss: number;
+  quantity: number;
+};
+
 export type ManualExtremesPayload = {
   manual_highest_price_reached?: number | null;
   manual_lowest_price_reached?: number | null;
@@ -61,4 +70,10 @@ export type SyncSummary = {
   total_open_trades: number;
   synced_trades: number;
   skipped_trades: number;
+  results: Array<{
+    trade_id: number;
+    symbol: string;
+    status: "synced" | "skipped";
+    reason: string;
+  }>;
 };

@@ -1,10 +1,16 @@
 "use client";
 
 import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { ArrowUpDown, Pencil, RefreshCw, X } from "lucide-react";
+import { ArrowUpDown, Pencil, RefreshCw, SquarePen, X } from "lucide-react";
 
-import { createTrade, fetchTrades, syncMarketData, updateManualExtremes } from "@/lib/api";
-import type { ManualExtremesPayload, Trade, TradeCreatePayload, TradeSide } from "@/lib/types";
+import { createTrade, fetchTrades, syncMarketData, updateManualExtremes, updateTrade } from "@/lib/api";
+import type {
+  ManualExtremesPayload,
+  Trade,
+  TradeCreatePayload,
+  TradeSide,
+  TradeUpdatePayload,
+} from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +35,15 @@ type ManualOverrideFormState = {
   manualNotes: string;
 };
 
+type TradeEditFormState = {
+  symbol: string;
+  side: TradeSide;
+  entryDateTime: string;
+  entryPrice: string;
+  stopLoss: string;
+  quantity: string;
+};
+
 const defaultFormState: TradeFormState = {
   symbol: "",
   side: "Long",
@@ -47,6 +62,15 @@ const defaultManualOverrideFormState: ManualOverrideFormState = {
   manualNotes: "",
 };
 
+const defaultEditFormState: TradeEditFormState = {
+  symbol: "",
+  side: "Long",
+  entryDateTime: new Date().toISOString().slice(0, 16),
+  entryPrice: "",
+  stopLoss: "",
+  quantity: "1",
+};
+
 function formatSigned(value: number | null | undefined, suffix = ""): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "--";
@@ -62,21 +86,39 @@ function formatPct(value: number | null | undefined): string {
   return formatSigned(value * 100, "%");
 }
 
+function toDateTimeLocal(isoString: string): string {
+  const date = new Date(isoString);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
 export function DashboardPage() {
   const [isLoadingTrades, setIsLoadingTrades] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSavingManual, setIsSavingManual] = useState(false);
+  const [isUpdatingTrade, setIsUpdatingTrade] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [allTrades, setAllTrades] = useState<Trade[]>([]);
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
+  const [editingTrade, setEditingTrade] = useState<Trade | null>(null);
   const [formState, setFormState] = useState<TradeFormState>(defaultFormState);
+  const [editFormState, setEditFormState] = useState<TradeEditFormState>(defaultEditFormState);
   const [manualFormState, setManualFormState] = useState<ManualOverrideFormState>(
     defaultManualOverrideFormState,
   );
+
+  const isManualPromptRequired = useMemo(() => {
+    const entry = new Date(formState.entryDateTime);
+    if (Number.isNaN(entry.getTime())) {
+      return false;
+    }
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    return Date.now() - entry.getTime() > sevenDaysMs;
+  }, [formState.entryDateTime]);
 
   const openTrades = useMemo(() => allTrades.filter((trade) => trade.status === "Open"), [allTrades]);
   const closedTrades = useMemo(() => allTrades.filter((trade) => trade.status === "Closed"), [allTrades]);
@@ -122,6 +164,68 @@ export function DashboardPage() {
     [closedTrades],
   );
 
+  const kpi = useMemo(() => {
+    const closedWithAnalytics = closedTrades.filter((trade) => trade.analytics && trade.exit_price !== null);
+    if (!closedWithAnalytics.length) {
+      return {
+        avgMaeR: null,
+        avgMfeR: null,
+        avgCapturePct: null,
+        recommendation: "Close a few trades to unlock personalized MAE/MFE recommendations.",
+      };
+    }
+
+    const maeValues = closedWithAnalytics
+      .map((trade) => trade.analytics?.mae_r)
+      .filter((value): value is number => value != null);
+    const mfeValues = closedWithAnalytics
+      .map((trade) => trade.analytics?.mfe_r)
+      .filter((value): value is number => value != null);
+
+    let captureSamples = 0;
+    let captureSum = 0;
+
+    for (const trade of closedWithAnalytics) {
+      if (!trade.analytics || trade.exit_price == null) {
+        continue;
+      }
+
+      const realizedPriceMove =
+        trade.side === "Long"
+          ? trade.exit_price - trade.entry_price
+          : trade.entry_price - trade.exit_price;
+
+      const realizedR =
+        trade.analytics.initial_risk === 0 ? null : realizedPriceMove / trade.analytics.initial_risk;
+      const mfeR = trade.analytics.mfe_r;
+
+      if (realizedR != null && mfeR != null && mfeR !== 0) {
+        captureSum += (realizedR / mfeR) * 100;
+        captureSamples += 1;
+      }
+    }
+
+    const avgMaeR = maeValues.length ? maeValues.reduce((sum, value) => sum + value, 0) / maeValues.length : null;
+    const avgMfeR = mfeValues.length ? mfeValues.reduce((sum, value) => sum + value, 0) / mfeValues.length : null;
+    const avgCapturePct = captureSamples ? captureSum / captureSamples : null;
+
+    let recommendation = "Trade quality is balanced. Keep journaling and refine setup-specific rules.";
+    if (avgMaeR != null && avgMaeR < -0.8) {
+      recommendation = "Average MAE is deep. Improve entries by waiting for confirmation or reducing size early.";
+    } else if (avgCapturePct != null && avgCapturePct < 40 && avgMfeR != null && avgMfeR > 1) {
+      recommendation = "You capture a small share of MFE. Test trailing stops or staged exits to keep winners longer.";
+    } else if (avgMfeR != null && avgMfeR < 0.7) {
+      recommendation = "Average MFE is low. Focus on higher-momentum setups and avoid low-volatility entries.";
+    }
+
+    return {
+      avgMaeR,
+      avgMfeR,
+      avgCapturePct,
+      recommendation,
+    };
+  }, [closedTrades]);
+
   async function loadTrades(): Promise<void> {
     setIsLoadingTrades(true);
     setErrorMessage(null);
@@ -146,8 +250,12 @@ export function DashboardPage() {
     try {
       const summary = await syncMarketData();
       await loadTrades();
+      const problemRows = summary.results.filter((item) => item.status === "skipped").slice(0, 2);
+      const problemHint = problemRows.length
+        ? ` ${problemRows.map((row) => `${row.symbol}: ${row.reason}`).join(" | ")}`
+        : "";
       setSuccessMessage(
-        `Sync complete. Synced ${summary.synced_trades}/${summary.total_open_trades} open trades.`,
+        `Sync complete. Synced ${summary.synced_trades}/${summary.total_open_trades} open trades.${problemHint}`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Market sync failed.");
@@ -158,6 +266,13 @@ export function DashboardPage() {
 
   function updateFormField<K extends keyof TradeFormState>(field: K, value: TradeFormState[K]): void {
     setFormState((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function updateEditFormField<K extends keyof TradeEditFormState>(
+    field: K,
+    value: TradeEditFormState[K],
+  ): void {
+    setEditFormState((prev) => ({ ...prev, [field]: value }));
   }
 
   async function handleCreateTrade(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -175,13 +290,13 @@ export function DashboardPage() {
       quantity: Number(formState.quantity),
     };
 
-    if (formState.manualHighestPrice.trim() !== "") {
+    if (isManualPromptRequired && formState.manualHighestPrice.trim() !== "") {
       payload.manual_highest_price_reached = Number(formState.manualHighestPrice);
     }
-    if (formState.manualLowestPrice.trim() !== "") {
+    if (isManualPromptRequired && formState.manualLowestPrice.trim() !== "") {
       payload.manual_lowest_price_reached = Number(formState.manualLowestPrice);
     }
-    if (formState.manualNotes.trim() !== "") {
+    if (isManualPromptRequired && formState.manualNotes.trim() !== "") {
       payload.manual_notes = formState.manualNotes.trim();
     }
 
@@ -205,6 +320,51 @@ export function DashboardPage() {
       setErrorMessage(error instanceof Error ? error.message : "Failed to create trade.");
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  function openEditModal(trade: Trade): void {
+    setEditingTrade(trade);
+    setEditFormState({
+      symbol: trade.symbol,
+      side: trade.side,
+      entryDateTime: toDateTimeLocal(trade.entry_date_time),
+      entryPrice: trade.entry_price.toString(),
+      stopLoss: trade.stop_loss.toString(),
+      quantity: trade.quantity.toString(),
+    });
+    setIsEditModalOpen(true);
+  }
+
+  async function handleUpdateTrade(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!editingTrade) {
+      return;
+    }
+
+    setIsUpdatingTrade(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const payload: TradeUpdatePayload = {
+      symbol: editFormState.symbol.trim(),
+      side: editFormState.side,
+      entry_date_time: new Date(editFormState.entryDateTime).toISOString(),
+      entry_price: Number(editFormState.entryPrice),
+      stop_loss: Number(editFormState.stopLoss),
+      quantity: Number(editFormState.quantity),
+    };
+
+    try {
+      await updateTrade(editingTrade.id, payload);
+      await loadTrades();
+      setSuccessMessage(`Trade ${editingTrade.symbol} updated successfully.`);
+      setIsEditModalOpen(false);
+      setEditingTrade(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to update trade.");
+    } finally {
+      setIsUpdatingTrade(false);
     }
   }
 
@@ -312,6 +472,44 @@ export function DashboardPage() {
         )}
 
         <section className="grid gap-6 lg:grid-cols-3">
+          <Card className="border-border/80 bg-card/80 backdrop-blur-sm">
+            <CardHeader>
+              <CardTitle>Avg MAE (R)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-semibold">{formatSigned(kpi.avgMaeR, "R")}</div>
+              <p className="mt-1 text-xs text-muted-foreground">Lower magnitude drawdown is better.</p>
+            </CardContent>
+          </Card>
+
+          <Card className="border-border/80 bg-card/80 backdrop-blur-sm">
+            <CardHeader>
+              <CardTitle>Avg MFE (R)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-semibold">{formatSigned(kpi.avgMfeR, "R")}</div>
+              <p className="mt-1 text-xs text-muted-foreground">Higher favorable excursion shows setup quality.</p>
+            </CardContent>
+          </Card>
+
+          <Card className="border-border/80 bg-card/80 backdrop-blur-sm">
+            <CardHeader>
+              <CardTitle>Avg Exit Capture</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-semibold">
+                {kpi.avgCapturePct == null ? "--" : `${kpi.avgCapturePct.toFixed(1)}%`}
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">Realized R as % of available MFE.</p>
+            </CardContent>
+          </Card>
+        </section>
+
+        <section className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">
+          <span className="font-medium text-foreground">Auto Coaching:</span> {kpi.recommendation}
+        </section>
+
+        <section className="grid gap-6 lg:grid-cols-3">
           <Card className="lg:col-span-1 border-border/80 bg-card/80 backdrop-blur-sm">
             <CardHeader>
               <CardTitle>Trade Entry</CardTitle>
@@ -381,10 +579,16 @@ export function DashboardPage() {
                         <TableCell>{formatPct(trade.analytics?.mae_pct)}</TableCell>
                         <TableCell>{formatPct(trade.analytics?.mfe_pct)}</TableCell>
                         <TableCell className="text-right">
-                          <Button variant="outline" className="h-8 px-3" onClick={() => openManualModal(trade)}>
-                            <Pencil className="mr-1 h-3.5 w-3.5" />
-                            Manual
-                          </Button>
+                          <div className="flex justify-end gap-2">
+                            <Button variant="outline" className="h-8 px-3" onClick={() => openEditModal(trade)}>
+                              <SquarePen className="mr-1 h-3.5 w-3.5" />
+                              Edit
+                            </Button>
+                            <Button variant="outline" className="h-8 px-3" onClick={() => openManualModal(trade)}>
+                              <Pencil className="mr-1 h-3.5 w-3.5" />
+                              Manual
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -517,42 +721,48 @@ export function DashboardPage() {
                   />
                 </label>
 
-                <div className="col-span-full rounded-md border p-3">
-                  <div className="mb-2 text-sm font-medium">Optional Manual Extremes (Safety Input)</div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <label className="flex flex-col gap-2 text-sm">
-                      Manual Highest Reached
-                      <input
-                        min={0.01}
-                        step="0.01"
-                        type="number"
-                        value={formState.manualHighestPrice}
-                        onChange={(event) => updateFormField("manualHighestPrice", event.target.value)}
-                        className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2 text-sm">
-                      Manual Lowest Reached
-                      <input
-                        min={0.01}
-                        step="0.01"
-                        type="number"
-                        value={formState.manualLowestPrice}
-                        onChange={(event) => updateFormField("manualLowestPrice", event.target.value)}
-                        className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2 text-sm md:col-span-2">
-                      Note (optional)
-                      <input
-                        value={formState.manualNotes}
-                        onChange={(event) => updateFormField("manualNotes", event.target.value)}
-                        placeholder="Source: chart screenshot / broker history"
-                        className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
-                      />
-                    </label>
+                {isManualPromptRequired && (
+                  <div className="col-span-full rounded-md border p-3">
+                    <div className="mb-1 text-sm font-medium">Manual Extremes (Recommended)</div>
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      Trade date is older than 7 days, so Yahoo 5m candles may be unavailable. Add manual values only if
+                      auto sync cannot fetch market data.
+                    </p>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <label className="flex flex-col gap-2 text-sm">
+                        Manual Highest Reached
+                        <input
+                          min={0.01}
+                          step="0.01"
+                          type="number"
+                          value={formState.manualHighestPrice}
+                          onChange={(event) => updateFormField("manualHighestPrice", event.target.value)}
+                          className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm">
+                        Manual Lowest Reached
+                        <input
+                          min={0.01}
+                          step="0.01"
+                          type="number"
+                          value={formState.manualLowestPrice}
+                          onChange={(event) => updateFormField("manualLowestPrice", event.target.value)}
+                          className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm md:col-span-2">
+                        Note (optional)
+                        <input
+                          value={formState.manualNotes}
+                          onChange={(event) => updateFormField("manualNotes", event.target.value)}
+                          placeholder="Source: chart screenshot / broker history"
+                          className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                        />
+                      </label>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <div className="col-span-full mt-2 flex items-center justify-end gap-2">
                   <Button variant="outline" onClick={() => setIsModalOpen(false)}>
@@ -560,6 +770,105 @@ export function DashboardPage() {
                   </Button>
                   <Button type="submit" disabled={isSubmitting}>
                     {isSubmitting ? "Saving..." : "Save Trade"}
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {isEditModalOpen && editingTrade && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 px-4 backdrop-blur-sm">
+          <Card className="w-full max-w-2xl border-border/90 bg-card/95 shadow-sm">
+            <CardHeader className="flex flex-row items-start justify-between space-y-0">
+              <div>
+                <CardTitle>Edit Trade</CardTitle>
+                <CardDescription>Update symbol, date/time, side and risk inputs.</CardDescription>
+              </div>
+              <Button variant="outline" className="h-9 w-9 p-0" onClick={() => setIsEditModalOpen(false)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </CardHeader>
+            <CardContent>
+              <form className="grid gap-4 md:grid-cols-2" onSubmit={(event) => void handleUpdateTrade(event)}>
+                <label className="flex flex-col gap-2 text-sm">
+                  Symbol
+                  <input
+                    required
+                    value={editFormState.symbol}
+                    onChange={(event) => updateEditFormField("symbol", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  Side
+                  <select
+                    value={editFormState.side}
+                    onChange={(event) => updateEditFormField("side", event.target.value as TradeSide)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  >
+                    <option value="Long">Long</option>
+                    <option value="Short">Short</option>
+                  </select>
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  Entry Date/Time
+                  <input
+                    required
+                    type="datetime-local"
+                    value={editFormState.entryDateTime}
+                    onChange={(event) => updateEditFormField("entryDateTime", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  Quantity
+                  <input
+                    required
+                    min={1}
+                    type="number"
+                    value={editFormState.quantity}
+                    onChange={(event) => updateEditFormField("quantity", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  Entry Price
+                  <input
+                    required
+                    min={0.01}
+                    step="0.01"
+                    type="number"
+                    value={editFormState.entryPrice}
+                    onChange={(event) => updateEditFormField("entryPrice", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  Stop Loss
+                  <input
+                    required
+                    min={0.01}
+                    step="0.01"
+                    type="number"
+                    value={editFormState.stopLoss}
+                    onChange={(event) => updateEditFormField("stopLoss", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <div className="col-span-full mt-2 flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={() => setIsEditModalOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={isUpdatingTrade}>
+                    {isUpdatingTrade ? "Updating..." : "Update Trade"}
                   </Button>
                 </div>
               </form>
