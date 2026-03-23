@@ -4,9 +4,13 @@ let schemaReady: Promise<void> | null = null;
 let sqlClient: ReturnType<typeof neon> | null = null;
 
 function getDatabaseUrl(): string {
-  const url = process.env.NETLIFY_DATABASE_URL ?? process.env.DATABASE_URL;
+  const url =
+    process.env.DATABASE_URL
+    ?? process.env.POSTGRES_URL
+    ?? process.env.POSTGRES_PRISMA_URL
+    ?? process.env.NEON_DATABASE_URL;
   if (!url) {
-    throw new Error("Missing NETLIFY_DATABASE_URL (or DATABASE_URL).");
+    throw new Error("Missing DATABASE_URL (or POSTGRES_URL / NEON_DATABASE_URL).");
   }
   return url;
 }

@@ -116,35 +116,22 @@ curl http://127.0.0.1:8000/health
 - SQLite uses a persistent Render Disk mounted at `/var/data`.
 - Production DB URL in `render.yaml`: `sqlite:////var/data/trades.db`
 
-## Netlify Deployment (Frontend + API on Netlify)
+## Vercel Deployment (Frontend + API with Neon)
 
-This repo now runs frontend and API together on Netlify using Next.js route handlers under `frontend/app/api/**`.
+This repo runs frontend and API together on Vercel using Next.js route handlers under `frontend/app/api/**`.
 
-### Important Production Requirement
-Use Neon Postgres through Netlify environment variables.
-
-### Netlify Setup Steps
-1. In Netlify, create a new site from this repository.
-2. Configure build settings:
-	- Base directory: `frontend`
-	- Build command: `npm run build`
-	- Publish directory: `.next`
-3. Add environment variables in Netlify Site Settings:
+### Vercel + Neon Setup Steps
+1. In Vercel, import this GitHub repository.
+2. Set **Root Directory** to `frontend`.
+3. Keep framework as **Next.js**.
+4. Add environment variables in Vercel Project Settings:
+	- `DATABASE_URL=<neon-connection-string>`
 	- `NEXT_PUBLIC_API_BASE_URL=/api`
-	- `NETLIFY_DATABASE_URL=<neon-connection-string>` (or `DATABASE_URL`)
-4. Deploy the site.
+5. Deploy.
 
-Netlify UI overrides can break path resolution. Keep these settings empty in UI unless needed:
-- Build command
-- Publish directory
-- Functions directory
-- Base directory
-
-Use values from `netlify.toml` as the source of truth.
-
-### API Routing on Netlify
+### API Routing on Vercel
 - Frontend calls `/api/...` (same-origin).
-- Next.js API routes (`frontend/app/api/**`) are deployed by Netlify's Next runtime.
+- Next.js route handlers in `frontend/app/api/**` serve backend endpoints.
 
 ### Local Development (unchanged)
 - Backend local run still uses `uvicorn` from `backend/`.
@@ -156,6 +143,12 @@ Use values from `netlify.toml` as the source of truth.
 - `APP_ENV`
 - `APP_DEBUG`
 - `DATABASE_URL`
+
+`frontend/lib/server/db.ts` supports (first available wins):
+- `DATABASE_URL`
+- `POSTGRES_URL`
+- `POSTGRES_PRISMA_URL`
+- `NEON_DATABASE_URL`
 
 ## Frontend Stack (Step 3)
 - Next.js (App Router, TypeScript)
