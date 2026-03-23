@@ -58,10 +58,33 @@ function isValidQuotePayload(value: unknown): value is {
   return typeof value === "object" && value !== null;
 }
 
+function isTransientYahooError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("timed out")
+    || message.includes("timeout")
+    || message.includes("econn")
+    || message.includes("enotfound")
+    || message.includes("429")
+    || message.includes("503")
+    || message.includes("service unavailable")
+    || message.includes("network")
+    || message.includes("socket")
+  );
+}
+
 async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
   const cleaned = rawSymbol.trim().toUpperCase();
   if (!cleaned) {
     throw new ApiError(400, "symbol is required.");
+  }
+
+  if (!/^[A-Z0-9.\-]{1,20}$/.test(cleaned)) {
+    throw new ApiError(400, `No such symbol found on Yahoo Finance for '${cleaned}'.`);
   }
 
   const candidates = Array.from(
@@ -72,13 +95,18 @@ async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
     ]),
   );
 
+  let transientFailureDetected = false;
+
   for (const candidate of candidates) {
     try {
       const quote: unknown = await yahooFinance.quote(candidate);
       if (isValidQuotePayload(quote) && (quote.symbol || quote.shortName || quote.longName)) {
         return candidate;
       }
-    } catch {
+    } catch (error) {
+      if (isTransientYahooError(error)) {
+        transientFailureDetected = true;
+      }
       // Try next candidate.
     }
   }
@@ -103,8 +131,15 @@ async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
         // Keep checking.
       }
     }
-  } catch {
+  } catch (error) {
+    if (isTransientYahooError(error)) {
+      transientFailureDetected = true;
+    }
     // Ignore search failure and throw clear error below.
+  }
+
+  if (transientFailureDetected) {
+    return normalizeSymbol(cleaned);
   }
 
   throw new ApiError(400, `No such symbol found on Yahoo Finance for '${cleaned}'.`);
