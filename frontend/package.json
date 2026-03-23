@@ -16,8 +16,7 @@
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "recharts": "^3.1.2",
-    "tailwind-merge": "^3.3.1",
-    "yahoo-finance2": "^3.13.2"
+    "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {
     "@types/estree": "^1.0.8",

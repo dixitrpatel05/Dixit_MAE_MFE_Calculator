@@ -1,5 +1,3 @@
-import yahooFinance from "yahoo-finance2";
-
 import type {
   ManualExtremesPayload,
   SyncSummary,
@@ -8,6 +6,9 @@ import type {
   TradeUpdatePayload,
 } from "@/lib/types";
 import { ensureSchema, sql } from "@/lib/server/db";
+
+const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
+const FINNHUB_BASE_URL = "https://finnhub.io/api/v1";
 
 type TradeRow = {
   id: number;
@@ -54,16 +55,7 @@ function normalizeSymbol(value: string): string {
   return `${cleaned}.NS`;
 }
 
-function isValidQuotePayload(value: unknown): value is {
-  symbol?: string | null;
-  shortName?: string | null;
-  longName?: string | null;
-  regularMarketPrice?: number | null;
-} {
-  return typeof value === "object" && value !== null;
-}
-
-function isTransientYahooError(error: unknown): boolean {
+function isTransientFinnhubError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
@@ -79,19 +71,111 @@ function isTransientYahooError(error: unknown): boolean {
     || message.includes("service unavailable")
     || message.includes("network")
     || message.includes("socket")
+    || message.includes("econnrefused")
   );
 }
 
-async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
+async function fetchFromFinnhub(endpoint: string, params: Record<string, string>): Promise<unknown> {
+  if (!FINNHUB_API_KEY) {
+    throw new ApiError(500, "FINNHUB_API_KEY is not configured.");
+  }
+
+  const url = new URL(`${FINNHUB_BASE_URL}${endpoint}`);
+  url.searchParams.append("token", FINNHUB_API_KEY);
+  Object.entries(params).forEach(([key, value]) => {
+    url.searchParams.append(key, value);
+  });
+
+  try {
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Finnhub API error: ${response.status} ${text}`);
+    }
+    return await response.json();
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("fetch")) {
+      throw new ApiError(503, "Finnhub service temporarily unavailable.");
+    }
+    throw error;
+  }
+}
+
+async function getFinnhubQuote(symbol: string): Promise<{
+  symbol?: string;
+  description?: string;
+  c?: number;
+} | null> {
+  try {
+    const data = await fetchFromFinnhub("/quote", { symbol });
+    if (typeof data === "object" && data !== null && "c" in data) {
+      return data as { symbol?: string; description?: string; c?: number };
+    }
+    return null;
+  } catch (error) {
+    if (isTransientFinnhubError(error)) {
+      return null; // Allow transient failures to pass through
+    }
+    throw error;
+  }
+}
+
+async function getFinnhubSymbolLookup(query: string): Promise<Array<{
+  symbol?: string;
+  description?: string;
+}>> {
+  try {
+    const data = (await fetchFromFinnhub("/search", { q: query })) as {
+      result?: Array<{ symbol?: string; description?: string }>;
+    };
+    return data.result ?? [];
+  } catch (error) {
+    if (isTransientFinnhubError(error)) {
+      return []; // Return empty on transient failure
+    }
+    throw error;
+  }
+}
+
+async function getFinnhubCandles(symbol: string, from: number, to: number): Promise<Array<{
+  h?: number;
+  l?: number;
+}>> {
+  try {
+    const data = (await fetchFromFinnhub("/candle", {
+      symbol,
+      resolution: "5",
+      from: Math.floor(from / 1000).toString(),
+      to: Math.floor(to / 1000).toString(),
+    })) as { c?: Array<number>; h?: Array<number>; l?: Array<number> };
+
+    const highs = data.h ?? [];
+    const lows = data.l ?? [];
+
+    if (!highs.length || !lows.length) {
+      return [];
+    }
+
+    return highs.map((h, i) => ({ h, l: lows[i] }));
+  } catch (error) {
+    if (isTransientFinnhubError(error)) {
+      return []; // Allow transient failures
+    }
+    throw error;
+  }
+}
+
+async function resolveFinnhubSymbol(rawSymbol: string): Promise<string> {
   const cleaned = rawSymbol.trim().toUpperCase();
   if (!cleaned) {
     throw new ApiError(400, "symbol is required.");
   }
 
   if (!/^[A-Z0-9.\-]{1,20}$/.test(cleaned)) {
-    throw new ApiError(400, `No such symbol found on Yahoo Finance for '${cleaned}'.`);
+    throw new ApiError(400, `Invalid symbol format '${cleaned}'.`);
   }
 
+  // Try direct candidates first (NSE/BSE suffixes)
   const candidates = Array.from(
     new Set([
       cleaned,
@@ -100,54 +184,55 @@ async function resolveYahooSymbol(rawSymbol: string): Promise<string> {
     ]),
   );
 
-  let transientFailureDetected = false;
-
   for (const candidate of candidates) {
     try {
-      const quote: unknown = await yahooFinance.quote(candidate);
-      if (isValidQuotePayload(quote) && (quote.symbol || quote.shortName || quote.longName)) {
+      const quote = await getFinnhubQuote(candidate);
+      if (quote && quote.symbol) {
         return candidate;
       }
-    } catch (error) {
-      if (isTransientYahooError(error)) {
-        transientFailureDetected = true;
-      }
-      // Try next candidate.
+    } catch {
+      // Try next candidate
     }
   }
 
+  // Fallback: Try symbol lookup via Finnhub search
   try {
-    const search = (await yahooFinance.search(cleaned, {
-      quotesCount: 8,
-      newsCount: 0,
-    })) as { quotes?: Array<{ symbol?: string | null }> };
-    const quoteCandidates = (search.quotes ?? [])
-      .map((item) => item.symbol)
-      .filter((symbol): symbol is string => typeof symbol === "string" && symbol.length > 0)
-      .filter((symbol) => !symbol.includes("="));
+    const results = await getFinnhubSymbolLookup(cleaned);
+    for (const result of results) {
+      if (!result.symbol) continue;
 
-    for (const candidate of quoteCandidates) {
-      try {
-        const quote: unknown = await yahooFinance.quote(candidate);
-        if (isValidQuotePayload(quote) && (quote.symbol || quote.shortName || quote.longName)) {
-          return candidate.toUpperCase();
+      const symbol = result.symbol.toUpperCase();
+      // Prefer NSE/BSE symbols for Indian stocks
+      if (symbol.endsWith(".NS") || symbol.endsWith(".BO")) {
+        try {
+          const quote = await getFinnhubQuote(symbol);
+          if (quote && quote.symbol) {
+            return symbol;
+          }
+        } catch {
+          // Continue searching
         }
-      } catch {
-        // Keep checking.
       }
     }
-  } catch (error) {
-    if (isTransientYahooError(error)) {
-      transientFailureDetected = true;
+
+    // If no NSE/BSE found, try the first result
+    for (const result of results) {
+      if (result.symbol) {
+        try {
+          const quote = await getFinnhubQuote(result.symbol);
+          if (quote && quote.symbol) {
+            return result.symbol.toUpperCase();
+          }
+        } catch {
+          // Continue searching
+        }
+      }
     }
-    // Ignore search failure and throw clear error below.
+  } catch {
+    // Search failed, fall through to error
   }
 
-  if (transientFailureDetected) {
-    return normalizeSymbol(cleaned);
-  }
-
-  throw new ApiError(400, `No such symbol found on Yahoo Finance for '${cleaned}'.`);
+  throw new ApiError(400, `Symbol '${cleaned}' not found on Finnhub.`);
 }
 
 function normalizeNotes(value: string | null | undefined): string | null {
@@ -299,7 +384,7 @@ export async function listTrades(status: "all" | "open" | "closed"): Promise<Tra
 export async function createTrade(payload: TradeCreatePayload): Promise<Trade> {
   await ensureSchema();
 
-  const symbol = await resolveYahooSymbol(normalizeSymbol(payload.symbol));
+  const symbol = await resolveFinnhubSymbol(normalizeSymbol(payload.symbol));
   const entryDateTime = toDate(payload.entry_date_time, "entry_date_time");
 
   if (!(payload.entry_price > 0) || !(payload.stop_loss > 0) || !(payload.quantity > 0)) {
@@ -404,7 +489,7 @@ export async function updateTrade(tradeId: number, payload: TradeUpdatePayload):
   const symbol =
     requestedSymbol.toUpperCase() === existingSymbol
       ? existing[0].symbol
-      : await resolveYahooSymbol(requestedSymbol);
+      : await resolveFinnhubSymbol(requestedSymbol);
   const entryDateTime = toDate(payload.entry_date_time, "entry_date_time");
 
   if (!(payload.entry_price > 0) || !(payload.stop_loss > 0) || !(payload.quantity > 0)) {
@@ -558,15 +643,18 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
     }
 
     try {
-      const chart = (await yahooFinance.chart(trade.symbol, {
-        period1: startTime,
-        period2: now,
-        interval: "5m",
-      })) as { quotes?: Array<{ high?: number | null; low?: number | null }> };
+      const candles = await getFinnhubCandles(
+        trade.symbol,
+        startTime.getTime(),
+        now.getTime(),
+      );
 
-      const quotes = chart.quotes ?? [];
-      const highs = quotes.map((quote) => quote.high).filter((value): value is number => Number.isFinite(value));
-      const lows = quotes.map((quote) => quote.low).filter((value): value is number => Number.isFinite(value));
+      const highs = candles
+        .map((candle) => candle.h)
+        .filter((value): value is number => Number.isFinite(value));
+      const lows = candles
+        .map((candle) => candle.l)
+        .filter((value): value is number => Number.isFinite(value));
 
       if (!highs.length || !lows.length) {
         if (isBeyondIntradayWindow) {
@@ -575,14 +663,14 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
             trade_id: trade.id,
             symbol: trade.symbol,
             status: "skipped",
-            reason: "No 5m Yahoo data beyond 7 days. Add manual MAE/MFE values.",
+            reason: "No 5m Finnhub data beyond 7 days. Add manual MAE/MFE values.",
           });
           continue;
         }
 
         try {
-          const quote: unknown = await yahooFinance.quote(trade.symbol);
-          const last = isValidQuotePayload(quote) ? quote.regularMarketPrice : null;
+          const quote = await getFinnhubQuote(trade.symbol);
+          const last = quote?.c ?? null;
           if (Number.isFinite(last)) {
             await sql`
               INSERT INTO trade_metrics (
@@ -660,7 +748,7 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
         trade_id: trade.id,
         symbol: trade.symbol,
         status: "synced",
-        reason: "Synced from Yahoo 5m candles.",
+        reason: "Synced from Finnhub 5m candles.",
       });
     } catch (error) {
       skippedTrades += 1;
