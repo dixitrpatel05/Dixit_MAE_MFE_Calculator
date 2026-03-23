@@ -112,6 +112,10 @@ export function DashboardPage() {
     defaultManualOverrideFormState,
   );
 
+  function showPopup(message: string): void {
+    window.alert(message);
+  }
+
   const isManualPromptRequired = useMemo(() => {
     const entry = new Date(formState.entryDateTime);
     if (Number.isNaN(entry.getTime())) {
@@ -256,11 +260,13 @@ export function DashboardPage() {
       const problemHint = problemRows.length
         ? ` ${problemRows.map((row) => `${row.symbol}: ${row.reason}`).join(" | ")}`
         : "";
-      setSuccessMessage(
-        `Sync complete. Synced ${summary.synced_trades}/${summary.total_open_trades} open trades.${problemHint}`,
-      );
+      const message = `Sync complete. Synced ${summary.synced_trades}/${summary.total_open_trades} open trades.${problemHint}`;
+      setSuccessMessage(message);
+      showPopup(message);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Market sync failed.");
+      const message = error instanceof Error ? error.message : "Market sync failed.";
+      setErrorMessage(message);
+      showPopup(message);
     } finally {
       setIsSyncing(false);
     }
@@ -278,9 +284,13 @@ export function DashboardPage() {
     try {
       await deleteTrade(trade.id);
       await loadTrades();
-      setSuccessMessage(`Trade ${trade.symbol} deleted.`);
+      const message = `Trade ${trade.symbol} deleted.`;
+      setSuccessMessage(message);
+      showPopup(message);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to delete trade.");
+      const message = error instanceof Error ? error.message : "Failed to delete trade.";
+      setErrorMessage(message);
+      showPopup(message);
     }
   }
 
@@ -325,7 +335,9 @@ export function DashboardPage() {
       && payload.manual_lowest_price_reached !== undefined
       && payload.manual_highest_price_reached < payload.manual_lowest_price_reached
     ) {
-      setErrorMessage("Manual highest must be greater than or equal to manual lowest.");
+      const message = "Manual highest must be greater than or equal to manual lowest.";
+      setErrorMessage(message);
+      showPopup(message);
       setIsSubmitting(false);
       return;
     }
@@ -335,9 +347,13 @@ export function DashboardPage() {
       setIsModalOpen(false);
       setFormState({ ...defaultFormState, entryDateTime: new Date().toISOString().slice(0, 16) });
       await loadTrades();
-      setSuccessMessage("Trade added successfully.");
+      const message = "Trade saved and synced to database.";
+      setSuccessMessage(message);
+      showPopup(message);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to create trade.");
+      const message = error instanceof Error ? error.message : "Failed to create trade.";
+      setErrorMessage(message);
+      showPopup(message);
     } finally {
       setIsSubmitting(false);
     }
@@ -378,11 +394,15 @@ export function DashboardPage() {
     try {
       await updateTrade(editingTrade.id, payload);
       await loadTrades();
-      setSuccessMessage(`Trade ${editingTrade.symbol} updated successfully.`);
+      const message = `Trade ${editingTrade.symbol} updated and saved.`;
+      setSuccessMessage(message);
+      showPopup(message);
       setIsEditModalOpen(false);
       setEditingTrade(null);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to update trade.");
+      const message = error instanceof Error ? error.message : "Failed to update trade.";
+      setErrorMessage(message);
+      showPopup(message);
     } finally {
       setIsUpdatingTrade(false);
     }
@@ -427,7 +447,9 @@ export function DashboardPage() {
       && payload.manual_lowest_price_reached !== null
       && payload.manual_highest_price_reached < payload.manual_lowest_price_reached
     ) {
-      setErrorMessage("Manual highest must be greater than or equal to manual lowest.");
+      const message = "Manual highest must be greater than or equal to manual lowest.";
+      setErrorMessage(message);
+      showPopup(message);
       setIsSavingManual(false);
       return;
     }
@@ -435,11 +457,15 @@ export function DashboardPage() {
     try {
       await updateManualExtremes(selectedTrade.id, payload);
       await loadTrades();
-      setSuccessMessage(`Manual extrema saved for ${selectedTrade.symbol}.`);
+      const message = `Manual extrema saved for ${selectedTrade.symbol}.`;
+      setSuccessMessage(message);
+      showPopup(message);
       setIsManualModalOpen(false);
       setSelectedTrade(null);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to save manual extrema.");
+      const message = error instanceof Error ? error.message : "Failed to save manual extrema.";
+      setErrorMessage(message);
+      showPopup(message);
     } finally {
       setIsSavingManual(false);
     }
@@ -695,6 +721,11 @@ export function DashboardPage() {
               </Button>
             </CardHeader>
             <CardContent>
+              {errorMessage && (
+                <div className="mb-3 rounded-md border border-input bg-card px-3 py-2 text-sm text-foreground">
+                  {errorMessage}
+                </div>
+              )}
               <form className="grid gap-4 md:grid-cols-2" onSubmit={(event) => void handleCreateTrade(event)}>
                 <label className="flex flex-col gap-2 text-sm">
                   Symbol
@@ -838,6 +869,11 @@ export function DashboardPage() {
               </Button>
             </CardHeader>
             <CardContent>
+              {errorMessage && (
+                <div className="mb-3 rounded-md border border-input bg-card px-3 py-2 text-sm text-foreground">
+                  {errorMessage}
+                </div>
+              )}
               <form className="grid gap-4 md:grid-cols-2" onSubmit={(event) => void handleUpdateTrade(event)}>
                 <label className="flex flex-col gap-2 text-sm">
                   Symbol
@@ -939,6 +975,11 @@ export function DashboardPage() {
               </Button>
             </CardHeader>
             <CardContent>
+              {errorMessage && (
+                <div className="mb-3 rounded-md border border-input bg-card px-3 py-2 text-sm text-foreground">
+                  {errorMessage}
+                </div>
+              )}
               <form className="grid gap-4" onSubmit={(event) => void handleSaveManualExtremes(event)}>
                 <label className="flex flex-col gap-2 text-sm">
                   Manual Highest Reached

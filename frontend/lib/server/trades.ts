@@ -39,7 +39,12 @@ export class ApiError extends Error {
 }
 
 function normalizeSymbol(value: string): string {
-  const cleaned = value.trim().toUpperCase();
+  const cleaned = value
+    .trim()
+    .toUpperCase()
+    .replace(/^NSE:/, "")
+    .replace(/^BSE:/, "")
+    .replace(/\s+/g, "");
   if (!cleaned) {
     throw new ApiError(400, "symbol is required.");
   }
