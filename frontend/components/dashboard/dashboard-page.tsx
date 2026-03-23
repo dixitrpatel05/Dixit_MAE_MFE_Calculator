@@ -3,10 +3,11 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { ArrowUpDown, Pencil, RefreshCw, SquarePen, Trash2, X } from "lucide-react";
 
-import { createTrade, deleteTrade, fetchTrades, syncMarketData, updateManualExtremes, updateTrade } from "@/lib/api";
+import { closeTrade, createTrade, deleteTrade, fetchTrades, syncMarketData, updateManualExtremes, updateTrade } from "@/lib/api";
 import type {
   ManualExtremesPayload,
   Trade,
+  TradeClosePayload,
   TradeCreatePayload,
   TradeSide,
   TradeUpdatePayload,
@@ -44,6 +45,12 @@ type TradeEditFormState = {
   quantity: string;
 };
 
+type TradeCloseFormState = {
+  exitDateTime: string;
+  exitPrice: string;
+  exitQuantity: string;
+};
+
 const defaultFormState: TradeFormState = {
   symbol: "",
   side: "Long",
@@ -69,6 +76,12 @@ const defaultEditFormState: TradeEditFormState = {
   entryPrice: "",
   stopLoss: "",
   quantity: "1",
+};
+
+const defaultCloseFormState: TradeCloseFormState = {
+  exitDateTime: new Date().toISOString().slice(0, 16),
+  exitPrice: "",
+  exitQuantity: "1",
 };
 
 function formatSigned(value: number | null | undefined, suffix = ""): string {
@@ -97,17 +110,21 @@ export function DashboardPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSavingManual, setIsSavingManual] = useState(false);
   const [isUpdatingTrade, setIsUpdatingTrade] = useState(false);
+  const [isClosingTrade, setIsClosingTrade] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+  const [isCloseModalOpen, setIsCloseModalOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [syncDetails, setSyncDetails] = useState<Array<{ symbol: string; status: "synced" | "skipped"; reason: string }>>([]);
   const [allTrades, setAllTrades] = useState<Trade[]>([]);
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
   const [editingTrade, setEditingTrade] = useState<Trade | null>(null);
+  const [closingTrade, setClosingTrade] = useState<Trade | null>(null);
   const [formState, setFormState] = useState<TradeFormState>(defaultFormState);
   const [editFormState, setEditFormState] = useState<TradeEditFormState>(defaultEditFormState);
+  const [closeFormState, setCloseFormState] = useState<TradeCloseFormState>(defaultCloseFormState);
   const [manualFormState, setManualFormState] = useState<ManualOverrideFormState>(
     defaultManualOverrideFormState,
   );
@@ -305,6 +322,13 @@ export function DashboardPage() {
     setEditFormState((prev) => ({ ...prev, [field]: value }));
   }
 
+  function updateCloseFormField<K extends keyof TradeCloseFormState>(
+    field: K,
+    value: TradeCloseFormState[K],
+  ): void {
+    setCloseFormState((prev) => ({ ...prev, [field]: value }));
+  }
+
   async function handleCreateTrade(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setIsSubmitting(true);
@@ -416,6 +440,49 @@ export function DashboardPage() {
       manualNotes: trade.metrics?.manual_notes ?? "",
     });
     setIsManualModalOpen(true);
+  }
+
+  function openCloseModal(trade: Trade): void {
+    setClosingTrade(trade);
+    setCloseFormState({
+      exitDateTime: new Date().toISOString().slice(0, 16),
+      exitPrice: "",
+      exitQuantity: trade.quantity.toString(),
+    });
+    setIsCloseModalOpen(true);
+  }
+
+  async function handleCloseTrade(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!closingTrade) {
+      return;
+    }
+
+    setIsClosingTrade(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const payload: TradeClosePayload = {
+      exit_date_time: new Date(closeFormState.exitDateTime).toISOString(),
+      exit_price: Number(closeFormState.exitPrice),
+      exit_quantity: Number(closeFormState.exitQuantity),
+    };
+
+    try {
+      await closeTrade(closingTrade.id, payload);
+      await loadTrades();
+      const message = `Trade ${closingTrade.symbol} closed successfully.`;
+      setSuccessMessage(message);
+      showPopup(message);
+      setIsCloseModalOpen(false);
+      setClosingTrade(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to close trade.";
+      setErrorMessage(message);
+      showPopup(message);
+    } finally {
+      setIsClosingTrade(false);
+    }
   }
 
   async function handleSaveManualExtremes(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -648,6 +715,9 @@ export function DashboardPage() {
                             <Button variant="outline" className="h-8 px-3" onClick={() => openEditModal(trade)}>
                               <SquarePen className="mr-1 h-3.5 w-3.5" />
                               Edit
+                            </Button>
+                            <Button variant="outline" className="h-8 px-3" onClick={() => openCloseModal(trade)}>
+                              Close
                             </Button>
                             <Button variant="outline" className="h-8 px-3" onClick={() => openManualModal(trade)}>
                               <Pencil className="mr-1 h-3.5 w-3.5" />
@@ -1027,6 +1097,78 @@ export function DashboardPage() {
                   </Button>
                   <Button type="submit" disabled={isSavingManual}>
                     {isSavingManual ? "Saving..." : "Save Manual Values"}
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {isCloseModalOpen && closingTrade && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 px-4 backdrop-blur-sm">
+          <Card className="w-full max-w-xl border-border/90 bg-card/95 shadow-sm">
+            <CardHeader className="flex flex-row items-start justify-between space-y-0">
+              <div>
+                <CardTitle>Close Trade</CardTitle>
+                <CardDescription>
+                  {closingTrade.symbol} · {closingTrade.side}
+                </CardDescription>
+              </div>
+              <Button variant="outline" className="h-9 w-9 p-0" onClick={() => setIsCloseModalOpen(false)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </CardHeader>
+            <CardContent>
+              {errorMessage && (
+                <div className="mb-3 rounded-md border border-input bg-card px-3 py-2 text-sm text-foreground">
+                  {errorMessage}
+                </div>
+              )}
+              <form className="grid gap-4" onSubmit={(event) => void handleCloseTrade(event)}>
+                <label className="flex flex-col gap-2 text-sm">
+                  Exit Date/Time
+                  <input
+                    required
+                    type="datetime-local"
+                    value={closeFormState.exitDateTime}
+                    onChange={(event) => updateCloseFormField("exitDateTime", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  Exit Quantity
+                  <input
+                    required
+                    min={1}
+                    max={closingTrade.quantity}
+                    type="number"
+                    value={closeFormState.exitQuantity}
+                    onChange={(event) => updateCloseFormField("exitQuantity", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  Exit Price
+                  <input
+                    required
+                    min={0.01}
+                    step="0.01"
+                    type="number"
+                    value={closeFormState.exitPrice}
+                    onChange={(event) => updateCloseFormField("exitPrice", event.target.value)}
+                    className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus-visible:ring-2"
+                  />
+                </label>
+
+                <div className="mt-2 flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={() => setIsCloseModalOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={isClosingTrade}>
+                    {isClosingTrade ? "Closing..." : "Close Trade"}
                   </Button>
                 </div>
               </form>

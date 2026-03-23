@@ -1,4 +1,5 @@
 import type {
+  TradeClosePayload,
   ManualExtremesPayload,
   SyncSummary,
   Trade,
@@ -57,6 +58,13 @@ export async function updateTrade(tradeId: number, payload: TradeUpdatePayload):
 export async function deleteTrade(tradeId: number): Promise<void> {
   await apiRequest<{ status: string }>(`/trades/${tradeId}`, {
     method: "DELETE",
+  });
+}
+
+export async function closeTrade(tradeId: number, payload: TradeClosePayload): Promise<Trade> {
+  return apiRequest<Trade>(`/trades/${tradeId}/close`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 

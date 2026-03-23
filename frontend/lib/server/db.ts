@@ -38,8 +38,14 @@ async function createSchema(): Promise<void> {
       quantity INTEGER NOT NULL,
       status VARCHAR(10) NOT NULL DEFAULT 'Open' CHECK (status IN ('Open', 'Closed')),
       exit_date_time TIMESTAMPTZ NULL,
-      exit_price DOUBLE PRECISION NULL
+      exit_price DOUBLE PRECISION NULL,
+      exit_quantity INTEGER NULL
     )
+  `;
+
+  await sql`
+    ALTER TABLE trades
+    ADD COLUMN IF NOT EXISTS exit_quantity INTEGER NULL
   `;
 
   await sql`

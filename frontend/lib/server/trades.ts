@@ -1,4 +1,5 @@
 import type {
+  TradeClosePayload,
   ManualExtremesPayload,
   SyncSummary,
   Trade,
@@ -21,6 +22,7 @@ type TradeRow = {
   status: "Open" | "Closed";
   exit_date_time: string | null;
   exit_price: number | null;
+  exit_quantity: number | null;
   absolute_highest_price_reached: number | null;
   absolute_lowest_price_reached: number | null;
   manual_highest_price_reached: number | null;
@@ -394,6 +396,7 @@ function toTradeResponse(row: TradeRow): Trade {
     status: row.status,
     exit_date_time: row.exit_date_time,
     exit_price: row.exit_price,
+    exit_quantity: row.exit_quantity,
     metrics: {
       absolute_highest_price_reached: row.absolute_highest_price_reached,
       absolute_lowest_price_reached: row.absolute_lowest_price_reached,
@@ -417,7 +420,7 @@ async function fetchTradesRows(status: "all" | "open" | "closed"): Promise<Trade
     return (await sql`
       SELECT
         t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
-        t.status, t.exit_date_time, t.exit_price,
+        t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
         m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
         m.manual_highest_price_reached, m.manual_lowest_price_reached,
         m.manual_notes, m.manual_updated_at, m.last_synced_at
@@ -432,7 +435,7 @@ async function fetchTradesRows(status: "all" | "open" | "closed"): Promise<Trade
     return (await sql`
       SELECT
         t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
-        t.status, t.exit_date_time, t.exit_price,
+        t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
         m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
         m.manual_highest_price_reached, m.manual_lowest_price_reached,
         m.manual_notes, m.manual_updated_at, m.last_synced_at
@@ -446,7 +449,7 @@ async function fetchTradesRows(status: "all" | "open" | "closed"): Promise<Trade
   return (await sql`
     SELECT
       t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
-      t.status, t.exit_date_time, t.exit_price,
+      t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
       m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
       m.manual_highest_price_reached, m.manual_lowest_price_reached,
       m.manual_notes, m.manual_updated_at, m.last_synced_at
@@ -539,7 +542,7 @@ export async function createTrade(payload: TradeCreatePayload): Promise<Trade> {
   const rows = (await sql`
     SELECT
       t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
-      t.status, t.exit_date_time, t.exit_price,
+      t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
       m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
       m.manual_highest_price_reached, m.manual_lowest_price_reached,
       m.manual_notes, m.manual_updated_at, m.last_synced_at
@@ -599,7 +602,7 @@ export async function updateTrade(tradeId: number, payload: TradeUpdatePayload):
   const rows = (await sql`
     SELECT
       t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
-      t.status, t.exit_date_time, t.exit_price,
+      t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
       m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
       m.manual_highest_price_reached, m.manual_lowest_price_reached,
       m.manual_notes, m.manual_updated_at, m.last_synced_at
@@ -671,7 +674,7 @@ export async function updateManualExtremes(tradeId: number, payload: ManualExtre
   const rows = (await sql`
     SELECT
       t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
-      t.status, t.exit_date_time, t.exit_price,
+      t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
       m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
       m.manual_highest_price_reached, m.manual_lowest_price_reached,
       m.manual_notes, m.manual_updated_at, m.last_synced_at
@@ -689,7 +692,7 @@ export async function syncMarketDataForOpenTrades(): Promise<SyncSummary> {
   const openTrades = (await sql`
     SELECT
       t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
-      t.status, t.exit_date_time, t.exit_price,
+      t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
       m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
       m.manual_highest_price_reached, m.manual_lowest_price_reached,
       m.manual_notes, m.manual_updated_at, m.last_synced_at
@@ -859,4 +862,71 @@ export async function deleteTrade(tradeId: number): Promise<void> {
   }
 
   await sql`DELETE FROM trades WHERE id = ${tradeId}`;
+}
+
+export async function closeTrade(tradeId: number, payload: TradeClosePayload): Promise<Trade> {
+  await ensureSchema();
+
+  const existing = (await sql`
+    SELECT id, status, quantity, entry_date_time
+    FROM trades
+    WHERE id = ${tradeId}
+  `) as unknown as Array<{
+    id: number;
+    status: "Open" | "Closed";
+    quantity: number;
+    entry_date_time: string;
+  }>;
+
+  if (!existing.length) {
+    throw new ApiError(404, "Trade not found.");
+  }
+
+  const trade = existing[0];
+  if (trade.status === "Closed") {
+    throw new ApiError(400, "Trade is already closed.");
+  }
+
+  const exitDateTime = toDate(payload.exit_date_time, "exit_date_time");
+  const entryDateTime = new Date(trade.entry_date_time);
+
+  if (!(payload.exit_price > 0)) {
+    throw new ApiError(400, "exit_price must be greater than 0.");
+  }
+
+  if (!Number.isInteger(payload.exit_quantity) || payload.exit_quantity <= 0) {
+    throw new ApiError(400, "exit_quantity must be a positive integer.");
+  }
+
+  if (payload.exit_quantity > trade.quantity) {
+    throw new ApiError(400, "exit_quantity cannot be greater than entry quantity.");
+  }
+
+  if (exitDateTime.getTime() < entryDateTime.getTime()) {
+    throw new ApiError(400, "exit_date_time cannot be earlier than entry_date_time.");
+  }
+
+  await sql`
+    UPDATE trades
+    SET
+      status = 'Closed',
+      exit_date_time = ${exitDateTime.toISOString()},
+      exit_price = ${payload.exit_price},
+      exit_quantity = ${payload.exit_quantity}
+    WHERE id = ${tradeId}
+  `;
+
+  const rows = (await sql`
+    SELECT
+      t.id, t.symbol, t.side, t.entry_date_time, t.entry_price, t.stop_loss, t.quantity,
+      t.status, t.exit_date_time, t.exit_price, t.exit_quantity,
+      m.absolute_highest_price_reached, m.absolute_lowest_price_reached,
+      m.manual_highest_price_reached, m.manual_lowest_price_reached,
+      m.manual_notes, m.manual_updated_at, m.last_synced_at
+    FROM trades t
+    LEFT JOIN trade_metrics m ON m.trade_id = t.id
+    WHERE t.id = ${tradeId}
+  `) as unknown as TradeRow[];
+
+  return toTradeResponse(rows[0]);
 }

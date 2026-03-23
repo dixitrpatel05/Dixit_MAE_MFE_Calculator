@@ -35,6 +35,7 @@ export type Trade = {
   status: "Open" | "Closed";
   exit_date_time: string | null;
   exit_price: number | null;
+  exit_quantity: number | null;
   metrics: TradeMetricSnapshot | null;
   analytics: TradeAnalytics | null;
 };
@@ -58,6 +59,12 @@ export type TradeUpdatePayload = {
   entry_price: number;
   stop_loss: number;
   quantity: number;
+};
+
+export type TradeClosePayload = {
+  exit_date_time: string;
+  exit_price: number;
+  exit_quantity: number;
 };
 
 export type ManualExtremesPayload = {
