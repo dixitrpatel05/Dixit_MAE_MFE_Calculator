@@ -92,6 +92,9 @@ function isTransientFinnhubError(error: unknown): boolean {
     || message.includes("network")
     || message.includes("socket")
     || message.includes("econnrefused")
+    || message.includes("too many requests")
+    || message.includes("rate limit")
+    || message.includes("finnhub service temporarily unavailable")
   );
 }
 
@@ -107,12 +110,43 @@ async function fetchFromFinnhub(endpoint: string, params: Record<string, string>
   });
 
   try {
-    const response = await fetch(url.toString());
+    const response = await fetch(url.toString(), {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    const bodyText = await response.text();
+
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Finnhub API error: ${response.status} ${text}`);
+      throw new Error(`Finnhub API error: ${response.status} ${bodyText}`);
     }
-    return await response.json();
+
+    if (!bodyText.trim()) {
+      throw new Error("Finnhub API returned an empty response.");
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bodyText) as unknown;
+    } catch {
+      if (bodyText.trimStart().startsWith("<")) {
+        throw new ApiError(
+          502,
+          "Finnhub returned HTML instead of JSON. Verify FINNHUB_API_KEY on Vercel, then redeploy.",
+        );
+      }
+      throw new Error("Finnhub returned invalid JSON.");
+    }
+
+    if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+      const errorMessage = (parsed as { error?: unknown }).error;
+      if (typeof errorMessage === "string" && errorMessage.trim().length > 0) {
+        throw new ApiError(502, `Finnhub error: ${errorMessage}`);
+      }
+    }
+
+    return parsed;
   } catch (error) {
     if (error instanceof Error && error.message.includes("fetch")) {
       throw new ApiError(503, "Finnhub service temporarily unavailable.");
